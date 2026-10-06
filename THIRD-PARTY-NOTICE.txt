@@ -1,0 +1,7 @@
+Nexora V1 uses the official Node.js Windows x64 runtime on first launch.
+
+Runtime source:
+https://nodejs.org/dist/v22.16.0/node-v22.16.0-win-x64.zip
+
+Node.js v22.16.0 is distributed by the Node.js project and remains under its applicable open-source license terms.
+Nexora does not bundle or modify the Node.js runtime in this source package; the Windows one-click launcher downloads it directly from the official Node.js distribution endpoint on first run.

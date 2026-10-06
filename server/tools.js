@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { appHome } from './config.js';
+import { createZipBuffer } from './zip.js';
 
 const IGNORE = new Set(['.git','node_modules','.DS_Store','config']);
 const TEXT_EXT = new Set(['.js','.jsx','.ts','.tsx','.json','.css','.html','.md','.txt','.yml','.yaml','.toml','.xml','.svg','.sql','.py','.rs','.go','.java','.c','.cpp','.h','.hpp','.vue','.svelte']);
 
-function rootFor(id) { return path.resolve(process.cwd(), 'workspaces', id); }
+function rootFor(id) { return path.join(appHome(), 'workspaces', id); }
 function safe(id, rel='') {
   const root = rootFor(id);
   const target = path.resolve(root, rel);
@@ -51,7 +52,7 @@ export async function executeTool(id, name, args={}) {
       const hits=[]; async function scan(dir) { for (const ent of await fs.readdir(dir,{withFileTypes:true})) { if (IGNORE.has(ent.name)) continue; const p=path.join(dir,ent.name); if(ent.isDirectory()) await scan(p); else if(TEXT_EXT.has(path.extname(ent.name).toLowerCase())) { const s=await fs.readFile(p,'utf8').catch(()=>null); if(s?.toLowerCase().includes(String(args.query).toLowerCase())) hits.push({path:path.relative(root,p),snippet:s.slice(Math.max(0,s.toLowerCase().indexOf(String(args.query).toLowerCase())-160), Math.min(s.length,s.toLowerCase().indexOf(String(args.query).toLowerCase())+320))}); } if(hits.length>=50) return; }} await scan(root); return JSON.stringify(hits);
     }
     case 'analyze_project': { const tree=await walk(root); const files=tree.flatMap(flat); const counts={}; for(const f of files){const ext=path.extname(f.path)||'(none)';counts[ext]=(counts[ext]||0)+1;} const entries=['package.json','README.md','index.html','src/main.jsx','src/main.tsx','server.js','vite.config.js'].filter(x=>files.some(f=>f.path.replaceAll('\\','/')===x)); return JSON.stringify({fileCount:files.length,extensions:counts,entryCandidates:entries,root}); }
-    case 'create_zip': return await createZip(id);
+    case 'create_zip': { const zip=await createZipBuffer(root); return JSON.stringify({projectId:id,archiveBase64:zip.toString('base64'),size:zip.length}); }
     default: throw new Error(`Unknown tool: ${name}`);
   }
 }

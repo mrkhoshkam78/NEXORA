@@ -2,12 +2,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-const root = path.resolve(process.cwd());
-const dir = path.join(root, 'config');
+const home = process.env.NEXORA_HOME || path.join(
+  process.env.APPDATA || process.env.HOME || process.cwd(),
+  'Nexora'
+);
+const dir = path.join(home, 'config');
 const keyPath = path.join(dir, 'master.key');
 const dataPath = path.join(dir, 'connection.enc.json');
 
-async function ensureDir() { await fs.mkdir(dir, { recursive: true, mode: 0o700 }); }
+async function ensureDir() { await fs.mkdir(dir, { recursive: true }); }
 async function getKey() {
   await ensureDir();
   try { return await fs.readFile(keyPath); } catch {}
@@ -22,13 +25,9 @@ export async function saveConnection(connection) {
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(connection), 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
-  await ensureDir();
   await fs.writeFile(dataPath, JSON.stringify({
-    v: 1,
-    iv: iv.toString('base64'),
-    tag: tag.toString('base64'),
-    data: ciphertext.toString('base64')
-  }), { mode: 0o600 });
+    v: 1, iv: iv.toString('base64'), tag: tag.toString('base64'), data: ciphertext.toString('base64')
+  }));
 }
 
 export async function loadConnection() {
@@ -45,3 +44,5 @@ export async function loadConnection() {
 export async function clearConnection() {
   try { await fs.unlink(dataPath); } catch {}
 }
+
+export function appHome() { return home; }

@@ -3,40 +3,35 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { loadConnection, saveConnection, clearConnection } from './config.js';
+import { loadConnection, saveConnection, clearConnection, appHome } from './config.js';
+import { extractZipBuffer, createZipBuffer } from './zip.js';
 import { validateAndDiscover, testModel, chatCompletion } from './cloudflare.js';
 import { toolDefinitions, executeTool } from './tools.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
-const ROOT = path.resolve(process.cwd(), 'workspaces');
+const ROOT = path.join(appHome(), 'workspaces');
 const PUBLIC = path.resolve(process.cwd(), 'public');
 await fs.mkdir(ROOT, { recursive: true });
 
 const mime = { '.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon','.txt':'text/plain; charset=utf-8' };
 const json = (res, status, data) => { const body=JSON.stringify(data); res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Content-Length':Buffer.byteLength(body)}); res.end(body); };
+async function tree(dir, base=''){
+  const out=[];
+  for(const e of await fs.readdir(dir,{withFileTypes:true})){
+    if(['node_modules','.git'].includes(e.name)) continue;
+    const full=path.join(dir,e.name), rel=path.join(base,e.name);
+    if(e.isDirectory()) out.push({type:'folder',path:rel,children:await tree(full,rel)});
+    else { const s=await fs.stat(full); out.push({type:'file',path:rel,size:s.size}); }
+  }
+  return out.sort((a,b)=>(a.type==='folder'?0:1)-(b.type==='folder'?0:1)||a.path.localeCompare(b.path));
+}
+function isModelError(e){ return [400,401,403,404,409].includes(e?.status) || /model|permission|access|not found/i.test(e?.message||''); }
+const SYSTEM=`You are Nexora, a precise coding agent. Work on the user's local project using the supplied tools. Never claim a change occurred unless a tool confirms it. Inspect relevant files before substantial edits. Preserve existing features unless explicitly asked to change them. Prefer focused edits. Do not invent project files or APIs.`;
 function cleanCred(c){ return c ? {connected:true,accountId:c.accountId,primaryModel:c.primaryModel||null,fallbacks:c.fallbacks||[],updatedAt:c.updatedAt} : {connected:false}; }
 async function readBody(req, max=5*1024*1024){ const chunks=[]; let n=0; for await(const c of req){n+=c.length;if(n>max)throw new Error('Request too large.');chunks.push(c);}return Buffer.concat(chunks); }
 async function readJson(req){ const b=await readBody(req,2*1024*1024); return JSON.parse(b.toString('utf8')||'{}'); }
 function projectPath(id, rel=''){ const root=path.resolve(ROOT,id); const p=path.resolve(root,rel); if(p!==root&&!p.startsWith(root+path.sep))throw new Error('Invalid project path.'); return p; }
-function spawnPromise(cmd,args,opts={}){return new Promise((resolve,reject)=>{const p=spawn(cmd,args,opts);let out='';let err='';p.stdout?.on('data',d=>out+=d);p.stderr?.on('data',d=>err+=d);p.on('close',c=>c===0?resolve({out,err}):reject(new Error(err||`${cmd} exited ${c}`)));p.on('error',reject);});}
-async function extractZip(zipPath, dest){
-  const py=`import sys,zipfile,os,posixpath
-z=zipfile.ZipFile(sys.argv[1]); root=os.path.abspath(sys.argv[2])
-for i in z.infolist():
- p=i.filename.replace('\\\\','/'); n=posixpath.normpath(p)
- if n.startswith('../') or n.startswith('/') or '/..' in n.split('/'):
-  raise SystemExit('Unsafe ZIP path detected: '+p)
- target=os.path.abspath(os.path.join(root,n))
- if target != root and not target.startswith(root+os.sep): raise SystemExit('Unsafe ZIP path detected')
-z.extractall(root)`;
-  await spawnPromise(process.env.PYTHON||'python3',['-c',py,zipPath,dest]);
-}
-async function tree(dir, base=''){ const out=[]; for(const e of await fs.readdir(dir,{withFileTypes:true})){ if(['node_modules','.git','config'].includes(e.name))continue;const full=path.join(dir,e.name),rel=path.join(base,e.name); if(e.isDirectory())out.push({type:'folder',path:rel,children:await tree(full,rel)});else{const s=await fs.stat(full);out.push({type:'file',path:rel,size:s.size});}}return out; }
-function isModelError(e){return [400,401,403,404,409].includes(e.status)||/model|permission|access|not found/i.test(e.message||'');}
-const SYSTEM=`You are Nexora, a precise coding agent. Work on the user's local project using the supplied tools. Never claim a change occurred unless a tool confirms it. Inspect relevant files before substantial edits. Preserve existing features unless explicitly asked to change them. Prefer focused edits. Do not invent project files or APIs.`;
-
 async function handle(req,res){
   const u=new URL(req.url,`http://${req.headers.host||HOST}`); const method=req.method||'GET';
   if(method==='GET' && u.pathname==='/api/status') return json(res,200,cleanCred(await loadConnection()));
@@ -47,12 +42,12 @@ async function handle(req,res){
   if(method==='POST' && u.pathname==='/api/setup/reset'){await clearConnection();return json(res,200,{ok:true});}
   if(method==='GET' && u.pathname==='/api/models'){const c=await loadConnection();if(!c)return json(res,401,{error:'Not connected.'});try{return json(res,200,await validateAndDiscover(c.accountId,c.token));}catch(e){return json(res,502,{error:e.message});}}
   if(method==='POST' && u.pathname==='/api/projects/import'){
-    try{const zip=await readBody(req,60*1024*1024);if(!zip.length)return json(res,400,{error:'ZIP body is empty.'});const id=crypto.randomUUID(),dir=path.join(ROOT,id),zipPath=path.join(ROOT,`${id}.upload.zip`);await fs.mkdir(dir,{recursive:true});await fs.writeFile(zipPath,zip);await extractZip(zipPath,dir);await fs.unlink(zipPath);return json(res,200,{projectId:id});}catch(e){return json(res,400,{error:e.message});}
+    try{const zip=await readBody(req,60*1024*1024);if(!zip.length)return json(res,400,{error:'ZIP body is empty.'});const id=crypto.randomUUID(),dir=path.join(ROOT,id);await extractZipBuffer(zip,dir);return json(res,200,{projectId:id});}catch(e){return json(res,400,{error:e.message});}
   }
   const tm=u.pathname.match(/^\/api\/projects\/([^/]+)\/tree$/); if(method==='GET'&&tm){try{return json(res,200,await tree(projectPath(tm[1])));}catch(e){return json(res,404,{error:e.message});}}
   const fm=u.pathname.match(/^\/api\/projects\/([^/]+)\/file$/); if(method==='GET'&&fm){try{const p=projectPath(fm[1],u.searchParams.get('path')||'');return json(res,200,{content:await fs.readFile(p,'utf8')});}catch(e){return json(res,404,{error:e.message});}}
   const sm=u.pathname.match(/^\/api\/projects\/([^/]+)\/file$/); if(method==='PUT'&&sm){try{const body=await readJson(req),p=projectPath(sm[1],body.path);await fs.mkdir(path.dirname(p),{recursive:true});await fs.writeFile(p,String(body.content??''),'utf8');return json(res,200,{ok:true});}catch(e){return json(res,400,{error:e.message});}}
-  const zm=u.pathname.match(/^\/api\/projects\/([^/]+)\/zip$/); if(method==='POST'&&zm){try{const id=zm[1],dir=projectPath(id),zipName=`nexora-${id}-${Date.now()}.zip`,zipPath=path.join(ROOT,zipName);await spawnPromise('zip',['-qr',zipPath,'.'],{cwd:dir});return json(res,200,{url:`/api/projects/${encodeURIComponent(id)}/zip-download?file=${encodeURIComponent(zipName)}`});}catch(e){return json(res,500,{error:e.message});}}
+  const zm=u.pathname.match(/^\/api\/projects\/([^/]+)\/zip$/); if(method==='POST'&&zm){try{const id=zm[1],dir=projectPath(id),zipName=`nexora-${id}-${Date.now()}.zip`,zipPath=path.join(ROOT,zipName);await fs.writeFile(zipPath,await createZipBuffer(dir));return json(res,200,{url:`/api/projects/${encodeURIComponent(id)}/zip-download?file=${encodeURIComponent(zipName)}`});}catch(e){return json(res,500,{error:e.message});}}
   const zd=u.pathname.match(/^\/api\/projects\/([^/]+)\/zip-download$/);if(method==='GET'&&zd){try{const f=u.searchParams.get('file')||'',p=path.resolve(ROOT,f);if(!p.startsWith(ROOT+path.sep)||!f.endsWith('.zip'))throw new Error('Invalid archive.');const b=await fs.readFile(p);res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':`attachment; filename="${path.basename(p)}"`,'Content-Length':b.length});res.end(b);}catch(e){return json(res,404,{error:e.message});}}
   if(method==='POST'&&u.pathname==='/api/chat'){
     const c=await loadConnection();if(!c)return json(res,401,{error:'Connect Cloudflare first.'});
@@ -79,4 +74,12 @@ async function handle(req,res){
   json(res,404,{error:'Not found'});
 }
 const server=http.createServer((req,res)=>handle(req,res).catch(e=>{if(!res.headersSent)json(res,500,{error:e.message});else res.end();}));
-server.listen(PORT,HOST,()=>console.log(`Nexora V1 running at http://${HOST}:${PORT}`));
+server.listen(PORT,HOST,()=>{
+  const url=`http://${HOST}:${PORT}`; console.log(`Nexora V1 running at ${url}`);
+  if(process.env.NEXORA_NO_BROWSER!=='1') {
+    import('node:child_process').then(({exec})=>{
+      const cmd=process.platform==='win32'?`start "" "${url}"`:process.platform==='darwin'?`open "${url}"`:`xdg-open "${url}"`;
+      exec(cmd,{windowsHide:true});
+    }).catch(()=>{});
+  }
+});
