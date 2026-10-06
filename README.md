@@ -29,3 +29,7 @@ Enter your Cloudflare Account ID and API Token in the Nexora Setup Wizard. Crede
 ## Notes
 
 The Windows launcher uses the official Node.js distribution URL for the fixed 22.16.0 x64 runtime. The runtime is downloaded only on the first launch and is kept locally for subsequent launches.
+
+## GitHub Pages
+
+GitHub Pages can host the UI preview. The full Nexora feature set requires the local secure backend and the Windows one-click launcher.
